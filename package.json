@@ -1,0 +1,89 @@
+{
+  "name": "log-search-extension",
+  "displayName": "Log Search Extension",
+  "description": "An extension to search log files by date range.",
+  "version": "1.0.0",
+  "publisher": "Anton Neledov",
+  "engines": {
+    "vscode": "^1.60.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": ["onCommand:logSearch.searchLogs"],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "logSearch.searchLogs",
+        "title": "Log Search: Search Logs by Date Range"
+      }
+    ],
+    "configuration": {
+      "type": "object",
+      "title": "Log Search Extension Configuration",
+      "properties": {
+        "logSearch.includePatterns": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Glob pattern to include files."
+          },
+          "default": ["**/*.log"],
+          "description": "Glob patterns to include files."
+        },
+        "logSearch.excludePatterns": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "description": "Glob pattern to exclude files."
+          },
+          "default": ["**/node_modules/**"],
+          "description": "Glob patterns to exclude files."
+        },
+        "logSearch.logLevels": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": ["ALL", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"],
+            "description": "Log level to include."
+          },
+          "default": ["INFO", "WARN", "ERROR", "FATAL"],
+          "description": "Log levels to include."
+        },
+        "logSearch.customTimestampRegexes": {
+          "type": "array",
+          "description": "Custom timestamp regex patterns and their formats.",
+          "items": {
+            "type": "object",
+            "properties": {
+              "pattern": {
+                "type": "string",
+                "description": "The regex pattern to match timestamps."
+              },
+              "format": {
+                "type": "string",
+                "description": "The date format corresponding to the regex pattern."
+              }
+            },
+            "required": ["pattern", "format"],
+            "additionalProperties": false
+          },
+          "default": []
+        }
+      }
+    }
+  },
+  "scripts": {
+    "vscode:prepublish": "npm run compile",
+    "compile": "tsc -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^14.14.31",
+    "@types/vscode": "^1.60.0",
+    "typescript": "^4.1.5",
+    "vscode": "^1.1.37"
+  },
+  "dependencies": {
+    "luxon": "^3.0.1",
+    "micromatch": "^4.0.4"
+  }
+}
