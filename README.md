@@ -291,7 +291,7 @@ Here is an example `settings.json` with custom configurations:
 
 ## Contributing
 
-Contributions are welcome! Please submit issues and pull requests via the [GitHub repository](https://github.com/your-username/log-search-extension).
+Contributions are welcome! Please submit issues and pull requests via the [GitHub repository](https://github.com/neledov/vscode-log-filter).
 
 ### Steps to Contribute
 
@@ -313,7 +313,7 @@ Contributions are welcome! Please submit issues and pull requests via the [GitHu
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE).
+This project is licensed under the [MIT License]
 
 ## Acknowledgments
 
