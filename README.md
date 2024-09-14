@@ -313,7 +313,7 @@ Contributions are welcome! Please submit issues and pull requests via the [GitHu
 
 ## License
 
-This project is licensed under the [MIT License]
+This project is licensed under the MIT License
 
 ## Acknowledgments
 
