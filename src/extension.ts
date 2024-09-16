@@ -113,9 +113,7 @@ export function activate(context: vscode.ExtensionContext) {
 
             displayResults(context, groupedEntries);
           } catch (err: any) {
-            vscode.window.showErrorMessage(
-              `Error during log search: ${err.message}`
-            );
+            vscode.window.showErrorMessage(`Error during log search: ${err.message}`);
           }
         }
       );
@@ -172,20 +170,15 @@ function parseTimestamp(line: string): number | null {
       const regex = new RegExp(pattern);
       const match = line.match(regex);
       if (match) {
-        // Use the captured group if available
         const timestampString = match[1] || match[0];
-
         let dateTime = DateTime.now();
 
-        // Handle UNIX timestamps
         if (format === 'X') {
           dateTime = DateTime.fromSeconds(parseInt(timestampString));
         } else if (format === 'x') {
           dateTime = DateTime.fromMillis(parseInt(timestampString));
         } else {
-          dateTime = DateTime.fromFormat(timestampString, format, {
-            zone: 'utc',
-          });
+          dateTime = DateTime.fromFormat(timestampString, format, { zone: 'utc' });
         }
 
         if (dateTime.isValid) {
@@ -197,7 +190,6 @@ function parseTimestamp(line: string): number | null {
     }
   }
 
-  // Default parsing: ISO 8601 format
   const isoRegex = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d+Z/;
   const match = line.match(isoRegex);
   if (match) {
@@ -208,6 +200,23 @@ function parseTimestamp(line: string): number | null {
   }
 
   return null;
+}
+
+function extractTimestampFromJson(jsonObject: any): number | null {
+  const timestampFields: string[] = vscode.workspace
+    .getConfiguration('logSearch')
+    .get('timestampFields', ['created', 'modified']); // Default to 'created' and 'modified'
+
+  for (const field of timestampFields) {
+    if (jsonObject.hasOwnProperty(field)) {
+      const timestamp = DateTime.fromISO(jsonObject[field], { zone: 'utc' });
+      if (timestamp.isValid) {
+        return timestamp.toMillis();
+      }
+    }
+  }
+
+  return null;  // No valid timestamp found in JSON
 }
 
 function isWithinRange(
@@ -221,7 +230,7 @@ function isWithinRange(
 function parseLogLevel(line: string): string | null {
   const regex = /\b(DEBUG|INFO|WARN|ERROR|FATAL)\b/i;
   const match = line.match(regex);
-  return match ? match[1].toLowerCase() : null; // Return null if no log level is found
+  return match ? match[1].toLowerCase() : null;
 }
 
 async function processLogFile(
@@ -241,6 +250,9 @@ async function processLogFile(
     const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
     let buffer = '';
     let lineNumber = 0;
+    let jsonBuffer = '';
+    let insideJson = false;
+    let openBracesCount = 0;
 
     stream.on('data', (data) => {
       if (token.isCancellationRequested) {
@@ -255,17 +267,46 @@ async function processLogFile(
 
       for (const line of lines) {
         lineNumber++;
-        const timestamp = parseTimestamp(line);
 
-        if (
-          timestamp !== null &&
-          isWithinRange(timestamp, startEpoch, endEpoch)
-        ) {
+        // Check if we are entering a JSON object
+        if (line.trim().startsWith('{')) {
+          insideJson = true;
+          openBracesCount = 1; // Start counting braces
+          jsonBuffer += line; // Add the current line to the buffer
+          continue;
+        }
+
+        // If inside JSON, accumulate lines and check for closing braces
+        if (insideJson) {
+          jsonBuffer += '\n' + line;
+          openBracesCount += (line.match(/{/g) || []).length; // Count opening braces
+          openBracesCount -= (line.match(/}/g) || []).length; // Count closing braces
+
+          if (openBracesCount === 0) {
+            // We have found the closing brace of the JSON object
+            insideJson = false;
+            try {
+              const jsonObject = JSON.parse(jsonBuffer);
+              jsonBuffer = ''; // Clear the buffer
+
+              // Extract timestamp from JSON and filter logs
+              const timestamp = extractTimestampFromJson(jsonObject);
+              if (timestamp && isWithinRange(timestamp, startEpoch, endEpoch)) {
+                matchedEntries.push({ timestamp, line: JSON.stringify(jsonObject), filePath, lineNumber });
+              }
+            } catch (error) {
+              console.error('Failed to parse JSON:', error);
+              jsonBuffer = ''; // Reset buffer if parsing fails
+            }
+          }
+          continue;
+        }
+
+        // Handle regular log lines (non-JSON)
+        const timestamp = parseTimestamp(line);
+        if (timestamp !== null && isWithinRange(timestamp, startEpoch, endEpoch)) {
           const logLevel = parseLogLevel(line);
-          if (
-            includeAllLevels ||
-            (logLevel && logLevels.includes(logLevel.toUpperCase()))
-          ) {
+          if (includeAllLevels || (logLevel && logLevels.includes(logLevel.toUpperCase()))) {
             matchedEntries.push({ timestamp, line, filePath, lineNumber });
           }
         }
@@ -273,22 +314,15 @@ async function processLogFile(
     });
 
     stream.on('end', () => {
-      // Process any remaining buffered data
-      if (buffer.length > 0) {
-        lineNumber++;
-        const timestamp = parseTimestamp(buffer);
-
-        if (
-          timestamp !== null &&
-          isWithinRange(timestamp, startEpoch, endEpoch)
-        ) {
-          const logLevel = parseLogLevel(buffer);
-          if (
-            includeAllLevels ||
-            (logLevel && logLevels.includes(logLevel.toUpperCase()))
-          ) {
-            matchedEntries.push({ timestamp, line: buffer, filePath, lineNumber });
+      if (jsonBuffer.length > 0) {
+        try {
+          const jsonObject = JSON.parse(jsonBuffer);
+          const timestamp = extractTimestampFromJson(jsonObject);
+          if (timestamp && isWithinRange(timestamp, startEpoch, endEpoch)) {
+            matchedEntries.push({ timestamp, line: JSON.stringify(jsonObject), filePath, lineNumber });
           }
+        } catch (error) {
+          console.error('Failed to parse remaining JSON buffer:', error);
         }
       }
       resolve();
@@ -300,7 +334,7 @@ async function processLogFile(
   });
 }
 
-// Updated function to group entries by file and sequential ranges
+
 function groupEntries(entries: LogEntry[]) {
   type Group = {
     filePath: string;
@@ -320,11 +354,9 @@ function groupEntries(entries: LogEntry[]) {
       entry.timestamp >= currentGroup.startTimestamp &&
       entry.timestamp >= currentGroup.endTimestamp
     ) {
-      // Continue current group
       currentGroup.entries.push(entry);
       currentGroup.endTimestamp = entry.timestamp;
     } else {
-      // Start a new group
       currentGroup = {
         filePath: entry.filePath,
         startTimestamp: entry.timestamp,
@@ -343,9 +375,7 @@ function displayResults(
   groupedEntries: any[]
 ) {
   if (groupedEntries.length === 0) {
-    vscode.window.showInformationMessage(
-      'No logs found in the specified range.'
-    );
+    vscode.window.showInformationMessage('No logs found in the specified range.');
     return;
   }
 
@@ -353,9 +383,7 @@ function displayResults(
     'logSearchResults',
     'Log Search Results',
     vscode.ViewColumn.One,
-    {
-      enableScripts: false, // Scripts are disabled
-    }
+    { enableScripts: false }
   );
 
   const htmlContent = getWebviewContent(groupedEntries);
@@ -363,24 +391,48 @@ function displayResults(
 }
 
 function getWebviewContent(groupedEntries: any[]): string {
+  const keywords: string[] = vscode.workspace.getConfiguration('logSearch').get('keywords', []);
+  const highlightColor = '#ff66cc'; // Pink color for highlighting keywords
+
   let contentHtml = '';
+
+  // Function to highlight keywords in the log message
+  const highlightKeywords = (text: string) => {
+    if (keywords.length > 0) {
+      const keywordRegex = new RegExp(`(${keywords.join('|')})`, 'gi');
+      return text.replace(keywordRegex, `<strong style="color:${highlightColor};">$1</strong>`);
+    }
+    return text;
+  };
 
   for (const group of groupedEntries) {
     const fileName = path.basename(group.filePath);
-    const startTime = DateTime.fromMillis(group.startTimestamp, {
-      zone: 'utc',
-    }).toFormat('yyyy-LL-dd HH:mm:ss');
-    const endTime = DateTime.fromMillis(group.endTimestamp, {
-      zone: 'utc',
-    }).toFormat('yyyy-LL-dd HH:mm:ss');
+    const startTime = DateTime.fromMillis(group.startTimestamp, { zone: 'utc' }).toFormat('yyyy-LL-dd HH:mm:ss');
+    const endTime = DateTime.fromMillis(group.endTimestamp, { zone: 'utc' }).toFormat('yyyy-LL-dd HH:mm:ss');
 
     let entriesHtml = '';
     for (const entry of group.entries) {
       const logLevel = parseLogLevel(entry.line) || 'info';
+
+      // Try to format the line as JSON and highlight it
+      let formattedLogMessage;
+      let jsonBadge = ''; // Initialize without badge
+
+      try {
+        const jsonObject = JSON.parse(entry.line);
+        const jsonText = JSON.stringify(jsonObject, null, 2);
+        formattedLogMessage = `<pre>${highlightKeywords(escapeHtml(jsonText))}</pre>`;
+        // If it's a valid JSON, add the JSON badge
+        jsonBadge = `<span class="json-badge" title="JSON Log Entry">🟢 JSON</span>`;
+      } catch (e) {
+        formattedLogMessage = `<pre>${highlightKeywords(escapeHtml(entry.line))}</pre>`;
+      }
+
       entriesHtml += `
         <div class="log-entry ${logLevel.toLowerCase()}">
           <span class="line-number">${entry.lineNumber}:</span>
-          <span class="log-message">${escapeHtml(entry.line)}</span>
+          ${jsonBadge} <!-- JSON badge only if it's a JSON log -->
+          <span class="log-message">${formattedLogMessage}</span>
         </div>
       `;
     }
@@ -396,86 +448,70 @@ function getWebviewContent(groupedEntries: any[]): string {
     `;
   }
 
-  // Enhanced CSS styling similar to GitHub's dark theme
   const style = `
     body {
       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
-      background-color: #0d1117;
-      color: #c9d1d9;
-      padding: 20px;
-    }
-    h1 {
-      color: #ffffff;
-      font-size: 24px;
+      background-color: #2d2d2d;
+      color: #d4d4d4;
+      padding: 10px;
+      font-size: 12px; /* Smaller font size */
     }
     details {
-      border: 1px solid #30363d;
-      border-radius: 6px;
-      margin-bottom: 10px;
-      padding: 10px;
-      background-color: #161b22;
+      border: 1px solid #444;
+      border-radius: 5px;
+      margin-bottom: 8px;
+      padding: 8px;
+      background-color: #333;
     }
     summary {
-      font-size: 16px;
+      font-size: 14px;
       font-weight: bold;
       cursor: pointer;
       display: flex;
       align-items: center;
+      color: #ffffff;
     }
     .file-name {
-      color: #58a6ff;
+      color: #bfbfbf;
       font-family: 'Consolas', 'Courier New', monospace;
       margin-right: 10px;
     }
     .timestamp-range {
-      color: #8b949e;
+      color: #8a8a8a;
+      font-style: italic;
     }
     .log-entry {
-      padding: 5px 0;
+      padding: 2px 0; /* Reduce spacing */
       display: flex;
+      align-items: flex-start;
     }
     .line-number {
-      color: #6e7681;
-      margin-right: 10px;
+      color: #888;
+      margin-right: 5px;
     }
     .log-message {
-      color: #c9d1d9;
       font-family: 'Consolas', 'Courier New', monospace;
-      font-size: 13px;
       white-space: pre-wrap;
       word-wrap: break-word;
+      color: #bfbfbf;
     }
-    /* Remove italics */
-    .timestamp-range, .line-number {
-      font-style: normal;
+    .json-badge {
+      background-color: #58a6ff;
+      color: white;
+      font-size: 9px;
+      padding: 1px 4px;
+      border-radius: 3px;
+      margin-left: 6px;
     }
-    /* Log level highlighting */
-    .log-entry.debug .log-message {
-      color: #8b949e; /* Gray */
+    .json-badge:hover {
+      background-color: #1f6feb;
     }
-    .log-entry.info .log-message {
-      color: #58a6ff; /* Blue */
+    pre {
+      margin: 0; /* Remove default margin on pre */
     }
-    .log-entry.warn .log-message {
-      color: #d29922; /* Yellow */
-    }
-    .log-entry.error .log-message {
-      color: #f85149; /* Red */
-    }
-    .log-entry.fatal .log-message {
-      color: #d73a49; /* Dark Red */
-    }
-    details > summary::-webkit-details-marker {
-      display: none;
-    }
-    summary::before {
-      content: '▶ ';
-      color: #8b949e;
-      display: inline-block;
-      transition: transform 0.2s ease;
-    }
-    details[open] > summary::before {
-      content: '▼ ';
+    strong {
+      font-weight: bold;
+      color: ${highlightColor}; /* Pink for highlighted keywords */
     }
   `;
 
@@ -484,9 +520,7 @@ function getWebviewContent(groupedEntries: any[]): string {
 <head>
 <meta charset="UTF-8">
 <title>Log Search Results</title>
-<style>
-${style}
-</style>
+<style>${style}</style>
 </head>
 <body>
 <h1>Log Search Results</h1>
@@ -501,7 +535,11 @@ function escapeHtml(unsafe: string): string {
   return unsafe
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;');
 }
+
+
 
 export function deactivate() {}

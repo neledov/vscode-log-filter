@@ -1,89 +1,73 @@
 {
-  "name": "log-search-extension",
-  "displayName": "Log Search Extension",
-  "description": "An extension to search log files by date range.",
-  "version": "1.0.0",
-  "publisher": "Anton Neledov",
+  "name": "log-search",
+  "displayName": "Log Search",
+  "description": "A VSCode extension for searching and filtering log files with support for JSON logs, keyword highlighting, and timestamp filtering.",
+  "version": "1.1.0",
   "engines": {
     "vscode": "^1.60.0"
   },
-  "categories": ["Other"],
-  "activationEvents": ["onCommand:logSearch.searchLogs"],
+  "categories": [
+    "Other"
+  ],
+  "activationEvents": [
+    "onCommand:logSearch.searchLogs"
+  ],
   "main": "./out/extension.js",
   "contributes": {
     "commands": [
       {
         "command": "logSearch.searchLogs",
-        "title": "Log Search: Search Logs by Date Range"
+        "title": "Search Logs"
       }
     ],
     "configuration": {
-      "type": "object",
-      "title": "Log Search Extension Configuration",
+      "title": "Log Search Settings",
       "properties": {
         "logSearch.includePatterns": {
           "type": "array",
-          "items": {
-            "type": "string",
-            "description": "Glob pattern to include files."
-          },
           "default": ["**/*.log"],
-          "description": "Glob patterns to include files."
+          "description": "File patterns to include in the log search."
         },
         "logSearch.excludePatterns": {
           "type": "array",
-          "items": {
-            "type": "string",
-            "description": "Glob pattern to exclude files."
-          },
           "default": ["**/node_modules/**"],
-          "description": "Glob patterns to exclude files."
+          "description": "File patterns to exclude from the log search."
         },
         "logSearch.logLevels": {
           "type": "array",
-          "items": {
-            "type": "string",
-            "enum": ["ALL", "DEBUG", "INFO", "WARN", "ERROR", "FATAL"],
-            "description": "Log level to include."
-          },
           "default": ["INFO", "WARN", "ERROR", "FATAL"],
-          "description": "Log levels to include."
+          "description": "Log levels to include in the search. Use 'ALL' to include all levels."
+        },
+        "logSearch.timestampFields": {
+          "type": "array",
+          "default": ["created", "modified"],
+          "description": "The JSON fields to extract timestamps from when processing JSON log entries."
         },
         "logSearch.customTimestampRegexes": {
           "type": "array",
-          "description": "Custom timestamp regex patterns and their formats.",
-          "items": {
-            "type": "object",
-            "properties": {
-              "pattern": {
-                "type": "string",
-                "description": "The regex pattern to match timestamps."
-              },
-              "format": {
-                "type": "string",
-                "description": "The date format corresponding to the regex pattern."
-              }
-            },
-            "required": ["pattern", "format"],
-            "additionalProperties": false
-          },
-          "default": []
+          "description": "Custom regex patterns for extracting timestamps from non-JSON log entries."
+        },
+        "logSearch.keywords": {
+          "type": "array",
+          "default": [],
+          "description": "Keywords to highlight in the log output."
         }
       }
     }
   },
   "scripts": {
-    "vscode:prepublish": "npm run compile",
-    "compile": "tsc -p ./"
+    "vscode:prepublish": "tsc -p ./",
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./",
+    "postinstall": "node ./node_modules/vscode/bin/install"
   },
   "devDependencies": {
-    "@types/node": "^14.14.31",
-    "@types/vscode": "^1.60.0",
-    "typescript": "^4.1.5",
-    "vscode": "^1.1.37"
+    "typescript": "^4.0.0",
+    "vscode": "^1.1.37",
+    "@types/node": "^12.0.0"
   },
   "dependencies": {
-    "luxon": "^3.0.1",
+    "luxon": "^2.0.2",
     "micromatch": "^4.0.4"
   }
 }
