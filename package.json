@@ -25,22 +25,34 @@
       "properties": {
         "logSearch.includePatterns": {
           "type": "array",
-          "default": ["**/*.log"],
+          "default": [
+            "**/*.log"
+          ],
           "description": "File patterns to include in the log search."
         },
         "logSearch.excludePatterns": {
           "type": "array",
-          "default": ["**/node_modules/**"],
+          "default": [
+            "**/node_modules/**"
+          ],
           "description": "File patterns to exclude from the log search."
         },
         "logSearch.logLevels": {
           "type": "array",
-          "default": ["INFO", "WARN", "ERROR", "FATAL"],
+          "default": [
+            "INFO",
+            "WARN",
+            "ERROR",
+            "FATAL"
+          ],
           "description": "Log levels to include in the search. Use 'ALL' to include all levels."
         },
         "logSearch.timestampFields": {
           "type": "array",
-          "default": ["created", "modified"],
+          "default": [
+            "created",
+            "modified"
+          ],
           "description": "The JSON fields to extract timestamps from when processing JSON log entries."
         },
         "logSearch.customTimestampRegexes": {
@@ -62,11 +74,14 @@
     "postinstall": "node ./node_modules/vscode/bin/install"
   },
   "devDependencies": {
+    "@types/mocha": "^10.0.8",
+    "@types/node": "^12.0.0",
+    "mocha": "^10.7.3",
     "typescript": "^4.0.0",
-    "vscode": "^1.1.37",
-    "@types/node": "^12.0.0"
+    "vscode": "^1.1.37"
   },
   "dependencies": {
+    "await-semaphore": "^0.1.3",
     "luxon": "^2.0.2",
     "micromatch": "^4.0.4"
   }

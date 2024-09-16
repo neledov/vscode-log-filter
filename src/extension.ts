@@ -4,193 +4,265 @@ import * as path from 'path';
 import { DateTime } from 'luxon'; // Import DateTime from Luxon
 const micromatch = require('micromatch');
 import { LogEntry } from './types';
+import { promisify } from 'util';
+import { Semaphore } from 'await-semaphore';
+import * as readline from 'readline';
 
+// Define the TimestampPattern interface
 interface TimestampPattern {
   pattern: string;
   format: string;
+}
+
+// Promisify necessary fs functions for asynchronous operations
+const readdir = promisify(fs.readdir);
+const stat = promisify(fs.stat);
+
+// Define a semaphore to limit the number of concurrent file processing operations
+const MAX_CONCURRENT_FILES = 10; // Adjust based on performance testing
+const semaphore = new Semaphore(MAX_CONCURRENT_FILES);
+
+// Cache configuration settings to avoid repeated retrievals
+let configCache: {
+  includePatterns: string[];
+  excludePatterns: string[];
+  customTimestampPatterns: TimestampPattern[];
+  timestampFields: string[];
+  logLevels: string[];
+  keywords: string[];
+} | null = null;
+
+// Precompile static regular expressions outside of loops
+const isoRegex = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d+Z/;
+const logLevelRegex = /\b(DEBUG|INFO|WARN|ERROR|FATAL)\b/i;
+
+// Preprocess and compile custom regex patterns
+interface CompiledTimestampPattern {
+  regex: RegExp;
+  format: string;
+}
+
+let compiledTimestampPatterns: CompiledTimestampPattern[] = [];
+
+// Initialize configurations and compile regex patterns
+async function initializeConfig() {
+  if (configCache) return;
+
+  configCache = {
+    includePatterns: vscode.workspace.getConfiguration('logSearch').get<string[]>('includePatterns', ['**/*.log']),
+    excludePatterns: vscode.workspace.getConfiguration('logSearch').get<string[]>('excludePatterns', ['**/node_modules/**']),
+    customTimestampPatterns: vscode.workspace.getConfiguration('logSearch').get<TimestampPattern[]>('customTimestampRegexes', []),
+    timestampFields: vscode.workspace.getConfiguration('logSearch').get<string[]>('timestampFields', ['created', 'modified']),
+    logLevels: vscode.workspace.getConfiguration('logSearch').get<string[]>('logLevels', ['INFO', 'WARN', 'ERROR', 'FATAL']),
+    keywords: vscode.workspace.getConfiguration('logSearch').get<string[]>('keywords', []),
+  };
+
+  // Compile custom timestamp regex patterns
+  compiledTimestampPatterns = configCache.customTimestampPatterns.map(({ pattern, format }) => ({
+    regex: new RegExp(pattern),
+    format,
+  }));
 }
 
 export function activate(context: vscode.ExtensionContext) {
   let disposable = vscode.commands.registerCommand(
     'logSearch.searchLogs',
     async () => {
-      // Step 1: Folder Selection
-      const folderUri = await vscode.window.showOpenDialog({
-        canSelectFiles: false,
-        canSelectFolders: true,
-        canSelectMany: false,
-        openLabel: 'Select Log Folder',
-      });
+      try {
+        // Step 1: Folder Selection
+        const folderUri = await vscode.window.showOpenDialog({
+          canSelectFiles: false,
+          canSelectFolders: true,
+          canSelectMany: false,
+          openLabel: 'Select Log Folder',
+        });
 
-      if (!folderUri) {
-        vscode.window.showErrorMessage('No folder selected');
-        return;
-      }
-
-      const folderPath = folderUri[0].fsPath;
-
-      // Step 2: Date Range Input
-      const startDateInput = await vscode.window.showInputBox({
-        prompt: 'Enter Start Date and Time (YYYY-MM-DD HH:MM:SS)',
-        placeHolder: 'YYYY-MM-DD HH:mm:ss',
-      });
-
-      if (!startDateInput) {
-        vscode.window.showErrorMessage('Start date is required');
-        return;
-      }
-
-      const endDateInput = await vscode.window.showInputBox({
-        prompt: 'Enter End Date and Time (YYYY-MM-DD HH:MM:SS)',
-        placeHolder: 'YYYY-MM-DD HH:mm:ss',
-      });
-
-      if (!endDateInput) {
-        vscode.window.showErrorMessage('End date is required');
-        return;
-      }
-
-      const startDateTime = DateTime.fromFormat(
-        startDateInput,
-        'yyyy-MM-dd HH:mm:ss',
-        { zone: 'utc' }
-      );
-      const endDateTime = DateTime.fromFormat(
-        endDateInput,
-        'yyyy-MM-dd HH:mm:ss',
-        { zone: 'utc' }
-      );
-
-      if (!startDateTime.isValid || !endDateTime.isValid) {
-        vscode.window.showErrorMessage('Invalid date format');
-        return;
-      }
-
-      const startEpoch = startDateTime.toMillis();
-      const endEpoch = endDateTime.toMillis();
-
-      // Step 3: Progress Bar and Log Processing
-      await vscode.window.withProgress(
-        {
-          location: vscode.ProgressLocation.Notification,
-          title: 'Searching Logs...',
-          cancellable: true,
-        },
-        async (progress, token) => {
-          token.onCancellationRequested(() => {
-            vscode.window.showWarningMessage('Log search was canceled.');
-          });
-
-          const matchedEntries: LogEntry[] = [];
-
-          try {
-            const logFiles = getLogFiles(folderPath);
-            const totalFiles = logFiles.length;
-            let processedFiles = 0;
-
-            for (const file of logFiles) {
-              if (token.isCancellationRequested) {
-                break;
-              }
-              await processLogFile(
-                file,
-                matchedEntries,
-                startEpoch,
-                endEpoch,
-                token
-              );
-              processedFiles++;
-              progress.report({
-                increment: (processedFiles / totalFiles) * 100,
-                message: `Processing file ${processedFiles} of ${totalFiles}`,
-              });
-            }
-
-            // Step 4: Sorting and Grouping Results
-            matchedEntries.sort((a, b) => a.timestamp - b.timestamp);
-
-            const groupedEntries = groupEntries(matchedEntries);
-
-            displayResults(context, groupedEntries);
-          } catch (err: any) {
-            vscode.window.showErrorMessage(`Error during log search: ${err.message}`);
-          }
+        if (!folderUri) {
+          vscode.window.showErrorMessage('No folder selected');
+          return;
         }
-      );
+
+        const folderPath = folderUri[0].fsPath;
+
+        // Step 2: Date Range Input
+        const startDateInput = await vscode.window.showInputBox({
+          prompt: 'Enter Start Date and Time in UTC (YYYY-MM-DD HH:MM:SS)',
+          placeHolder: 'YYYY-MM-DD HH:mm:ss',
+        });
+
+        if (!startDateInput) {
+          vscode.window.showErrorMessage('Start date is required');
+          return;
+        }
+
+        const endDateInput = await vscode.window.showInputBox({
+          prompt: 'Enter End Date and Time in UTC (YYYY-MM-DD HH:MM:SS)',
+          placeHolder: 'YYYY-MM-DD HH:mm:ss',
+        });
+
+        if (!endDateInput) {
+          vscode.window.showErrorMessage('End date is required');
+          return;
+        }
+
+        const startDateTime = DateTime.fromFormat(
+          startDateInput,
+          'yyyy-MM-dd HH:mm:ss',
+          { zone: 'utc' }
+        );
+        const endDateTime = DateTime.fromFormat(
+          endDateInput,
+          'yyyy-MM-dd HH:mm:ss',
+          { zone: 'utc' }
+        );
+
+        if (!startDateTime.isValid || !endDateTime.isValid) {
+          vscode.window.showErrorMessage('Invalid date format');
+          return;
+        }
+
+        const startEpoch = startDateTime.toMillis();
+        const endEpoch = endDateTime.toMillis();
+
+        // Initialize configurations
+        await initializeConfig();
+
+        // Step 3: Progress Bar and Log Processing
+        await vscode.window.withProgress(
+          {
+            location: vscode.ProgressLocation.Notification,
+            title: 'Searching Logs...',
+            cancellable: true,
+          },
+          async (progress, token) => {
+            token.onCancellationRequested(() => {
+              vscode.window.showWarningMessage('Log search was canceled.');
+            });
+
+            const matchedEntries: LogEntry[] = [];
+
+            try {
+              const logFiles = await getLogFiles(folderPath);
+              const totalFiles = logFiles.length;
+              let processedFiles = 0;
+
+              // Process files with limited concurrency
+              const processingPromises = logFiles.map(async (file) => {
+                const release = await semaphore.acquire();
+                try {
+                  await processLogFile(
+                    file,
+                    matchedEntries,
+                    startEpoch,
+                    endEpoch,
+                    token
+                  );
+                  processedFiles++;
+                  progress.report({
+                    increment: (1 / totalFiles) * 100,
+                    message: `Processing file ${processedFiles} of ${totalFiles}`,
+                  });
+                } finally {
+                  release();
+                }
+              });
+
+              await Promise.all(processingPromises);
+
+              // Step 4: Sorting and Grouping Results
+              matchedEntries.sort((a, b) => a.timestamp - b.timestamp);
+
+              const groupedEntries = groupEntries(matchedEntries);
+
+              displayResults(context, groupedEntries);
+            } catch (err: any) {
+              vscode.window.showErrorMessage(`Error during log search: ${err.message}`);
+            }
+          }
+        );
+      } catch (err: any) {
+        vscode.window.showErrorMessage(`Unexpected error: ${err.message}`);
+      }
     }
   );
 
   context.subscriptions.push(disposable);
 }
 
-function getLogFiles(folderPath: string): string[] {
-  const includePatterns: string[] = vscode.workspace
-    .getConfiguration('logSearch')
-    .get('includePatterns', ['**/*.log']);
-  const excludePatterns: string[] = vscode.workspace
-    .getConfiguration('logSearch')
-    .get('excludePatterns', ['**/node_modules/**']);
+/**
+ * Asynchronously retrieves log files based on include and exclude patterns.
+ * Utilizes parallel directory traversal to enhance performance.
+ */
+async function getLogFiles(folderPath: string): Promise<string[]> {
+  const { includePatterns, excludePatterns } = configCache!;
 
-  let files: string[] = [];
+  const files: string[] = [];
 
-  function walkDirectory(dir: string) {
-    const items = fs.readdirSync(dir);
+  async function walkDirectory(dir: string) {
+    let items: string[];
+    try {
+      items = await readdir(dir);
+    } catch (err) {
+      console.error(`Failed to read directory: ${dir}`, err);
+      return;
+    }
 
-    for (const item of items) {
+    const statPromises = items.map(async (item) => {
       const itemPath = path.join(dir, item);
-      const stats = fs.statSync(itemPath);
+      let itemStats: fs.Stats;
+      try {
+        itemStats = await stat(itemPath);
+      } catch (err) {
+        console.error(`Failed to stat path: ${itemPath}`, err);
+        return;
+      }
 
-      if (stats.isFile()) {
+      if (itemStats.isFile()) {
         const relativePath = path.relative(folderPath, itemPath);
-
         if (
           micromatch.isMatch(relativePath, includePatterns) &&
           !micromatch.isMatch(relativePath, excludePatterns)
         ) {
           files.push(itemPath);
         }
-      } else if (stats.isDirectory()) {
-        walkDirectory(itemPath);
+      } else if (itemStats.isDirectory()) {
+        await walkDirectory(itemPath);
       }
-    }
+    });
+
+    await Promise.all(statPromises);
   }
 
-  walkDirectory(folderPath);
+  await walkDirectory(folderPath);
 
   return files;
 }
 
+/**
+ * Parses a line to extract a timestamp.
+ * Utilizes precompiled custom regex patterns for efficiency.
+ */
 function parseTimestamp(line: string): number | null {
-  const customPatterns = vscode.workspace
-    .getConfiguration('logSearch')
-    .get<TimestampPattern[]>('customTimestampRegexes', []);
+  for (const { regex, format } of compiledTimestampPatterns) {
+    const match = line.match(regex);
+    if (match) {
+      const timestampString = match[1] || match[0];
+      let dateTime = DateTime.now(); // Using let dateTime = DateTime.now();
 
-  for (const { pattern, format } of customPatterns) {
-    try {
-      const regex = new RegExp(pattern);
-      const match = line.match(regex);
-      if (match) {
-        const timestampString = match[1] || match[0];
-        let dateTime = DateTime.now();
-
-        if (format === 'X') {
-          dateTime = DateTime.fromSeconds(parseInt(timestampString));
-        } else if (format === 'x') {
-          dateTime = DateTime.fromMillis(parseInt(timestampString));
-        } else {
-          dateTime = DateTime.fromFormat(timestampString, format, { zone: 'utc' });
-        }
-
-        if (dateTime.isValid) {
-          return dateTime.toMillis();
-        }
+      if (format === 'X') {
+        dateTime = DateTime.fromSeconds(parseInt(timestampString, 10));
+      } else if (format === 'x') {
+        dateTime = DateTime.fromMillis(parseInt(timestampString, 10));
+      } else {
+        dateTime = DateTime.fromFormat(timestampString, format, { zone: 'utc' });
       }
-    } catch (error) {
-      console.error(`Invalid regex pattern or date format: ${pattern}`, error);
+
+      if (dateTime.isValid) {
+        return dateTime.toMillis();
+      }
     }
   }
 
-  const isoRegex = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d+Z/;
   const match = line.match(isoRegex);
   if (match) {
     const dateTime = DateTime.fromISO(match[0], { zone: 'utc' });
@@ -202,12 +274,11 @@ function parseTimestamp(line: string): number | null {
   return null;
 }
 
+/**
+ * Extracts a timestamp from a JSON object based on configured timestamp fields.
+ */
 function extractTimestampFromJson(jsonObject: any): number | null {
-  const timestampFields: string[] = vscode.workspace
-    .getConfiguration('logSearch')
-    .get('timestampFields', ['created', 'modified']); // Default to 'created' and 'modified'
-
-  for (const field of timestampFields) {
+  for (const field of configCache!.timestampFields) {
     if (jsonObject.hasOwnProperty(field)) {
       const timestamp = DateTime.fromISO(jsonObject[field], { zone: 'utc' });
       if (timestamp.isValid) {
@@ -216,9 +287,12 @@ function extractTimestampFromJson(jsonObject: any): number | null {
     }
   }
 
-  return null;  // No valid timestamp found in JSON
+  return null; // No valid timestamp found in JSON
 }
 
+/**
+ * Checks if a timestamp is within the specified range.
+ */
 function isWithinRange(
   timestamp: number,
   startEpoch: number,
@@ -227,115 +301,135 @@ function isWithinRange(
   return timestamp >= startEpoch && timestamp <= endEpoch;
 }
 
+/**
+ * Parses the log level from a line.
+ * Utilizes a precompiled regex for efficiency.
+ */
 function parseLogLevel(line: string): string | null {
-  const regex = /\b(DEBUG|INFO|WARN|ERROR|FATAL)\b/i;
-  const match = line.match(regex);
+  const match = line.match(logLevelRegex);
   return match ? match[1].toLowerCase() : null;
 }
 
+/**
+ * Asynchronously processes a single log file to extract matching log entries.
+ * Utilizes streams and readline for efficient line-by-line processing.
+ */
 async function processLogFile(
   filePath: string,
   matchedEntries: LogEntry[],
   startEpoch: number,
   endEpoch: number,
   token: vscode.CancellationToken
-) {
-  const logLevels: string[] = vscode.workspace
-    .getConfiguration('logSearch')
-    .get('logLevels', ['INFO', 'WARN', 'ERROR', 'FATAL']);
+): Promise<void> {
+  if (token.isCancellationRequested) {
+    return;
+  }
 
+  const { logLevels } = configCache!;
   const includeAllLevels = logLevels.includes('ALL');
+  const normalizedLogLevels = logLevels.map((level) => level.toUpperCase());
 
-  return new Promise<void>((resolve, reject) => {
-    const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
-    let buffer = '';
-    let lineNumber = 0;
-    let jsonBuffer = '';
-    let insideJson = false;
-    let openBracesCount = 0;
+  const fileStream = fs.createReadStream(filePath, { encoding: 'utf8' });
 
-    stream.on('data', (data) => {
+  const rl = readline.createInterface({
+    input: fileStream,
+    crlfDelay: Infinity,
+  });
+
+  let lineNumber = 0;
+  let jsonBuffer = '';
+  let insideJson = false;
+  let openBracesCount = 0;
+
+  try {
+    for await (const line of rl) {
       if (token.isCancellationRequested) {
-        stream.close();
-        resolve();
+        rl.close();
+        fileStream.close();
         return;
       }
 
-      buffer += data;
-      let lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() || '';
+      lineNumber++;
 
-      for (const line of lines) {
-        lineNumber++;
+      // Check if we are entering a JSON object
+      if (line.trim().startsWith('{')) {
+        insideJson = true;
+        openBracesCount = 1;
+        jsonBuffer = line;
+        continue;
+      }
 
-        // Check if we are entering a JSON object
-        if (line.trim().startsWith('{')) {
-          insideJson = true;
-          openBracesCount = 1; // Start counting braces
-          jsonBuffer += line; // Add the current line to the buffer
-          continue;
-        }
+      if (insideJson) {
+        jsonBuffer += '\n' + line;
+        openBracesCount += (line.match(/{/g) || []).length;
+        openBracesCount -= (line.match(/}/g) || []).length;
 
-        // If inside JSON, accumulate lines and check for closing braces
-        if (insideJson) {
-          jsonBuffer += '\n' + line;
-          openBracesCount += (line.match(/{/g) || []).length; // Count opening braces
-          openBracesCount -= (line.match(/}/g) || []).length; // Count closing braces
-
-          if (openBracesCount === 0) {
-            // We have found the closing brace of the JSON object
-            insideJson = false;
-            try {
-              const jsonObject = JSON.parse(jsonBuffer);
-              jsonBuffer = ''; // Clear the buffer
-
-              // Extract timestamp from JSON and filter logs
-              const timestamp = extractTimestampFromJson(jsonObject);
-              if (timestamp && isWithinRange(timestamp, startEpoch, endEpoch)) {
-                matchedEntries.push({ timestamp, line: JSON.stringify(jsonObject), filePath, lineNumber });
-              }
-            } catch (error) {
-              console.error('Failed to parse JSON:', error);
-              jsonBuffer = ''; // Reset buffer if parsing fails
+        if (openBracesCount === 0) {
+          insideJson = false;
+          try {
+            const jsonObject = JSON.parse(jsonBuffer);
+            const timestamp = extractTimestampFromJson(jsonObject);
+            if (timestamp && isWithinRange(timestamp, startEpoch, endEpoch)) {
+              matchedEntries.push({
+                timestamp,
+                line: JSON.stringify(jsonObject),
+                filePath,
+                lineNumber,
+              });
             }
+          } catch (error) {
+            console.error('Failed to parse JSON:', error);
+          } finally {
+            jsonBuffer = '';
           }
-          continue;
         }
+        continue;
+      }
 
-        // Handle regular log lines (non-JSON)
-        const timestamp = parseTimestamp(line);
-        if (timestamp !== null && isWithinRange(timestamp, startEpoch, endEpoch)) {
-          const logLevel = parseLogLevel(line);
-          if (includeAllLevels || (logLevel && logLevels.includes(logLevel.toUpperCase()))) {
-            matchedEntries.push({ timestamp, line, filePath, lineNumber });
-          }
+      // Handle regular log lines (non-JSON)
+      const timestamp = parseTimestamp(line);
+      if (timestamp !== null && isWithinRange(timestamp, startEpoch, endEpoch)) {
+        const logLevel = parseLogLevel(line);
+        if (includeAllLevels || (logLevel && normalizedLogLevels.includes(logLevel.toUpperCase()))) {
+          matchedEntries.push({
+            timestamp,
+            line,
+            filePath,
+            lineNumber,
+          });
         }
       }
-    });
+    }
 
-    stream.on('end', () => {
-      if (jsonBuffer.length > 0) {
-        try {
-          const jsonObject = JSON.parse(jsonBuffer);
-          const timestamp = extractTimestampFromJson(jsonObject);
-          if (timestamp && isWithinRange(timestamp, startEpoch, endEpoch)) {
-            matchedEntries.push({ timestamp, line: JSON.stringify(jsonObject), filePath, lineNumber });
-          }
-        } catch (error) {
-          console.error('Failed to parse remaining JSON buffer:', error);
+    // Handle any remaining JSON buffer
+    if (jsonBuffer.length > 0 && insideJson) {
+      try {
+        const jsonObject = JSON.parse(jsonBuffer);
+        const timestamp = extractTimestampFromJson(jsonObject);
+        if (timestamp && isWithinRange(timestamp, startEpoch, endEpoch)) {
+          matchedEntries.push({
+            timestamp,
+            line: JSON.stringify(jsonObject),
+            filePath,
+            lineNumber,
+          });
         }
+      } catch (error) {
+        console.error('Failed to parse remaining JSON buffer:', error);
       }
-      resolve();
-    });
-
-    stream.on('error', (err) => {
-      reject(err);
-    });
-  });
+    }
+  } catch (err) {
+    console.error(`Error processing file ${filePath}:`, err);
+  } finally {
+    rl.close();
+    fileStream.close();
+  }
 }
 
-
-function groupEntries(entries: LogEntry[]) {
+/**
+ * Groups log entries by file path and sequential timestamps.
+ */
+function groupEntries(entries: LogEntry[]): any[] {
   type Group = {
     filePath: string;
     startTimestamp: number;
@@ -344,7 +438,6 @@ function groupEntries(entries: LogEntry[]) {
   };
 
   const groups: Group[] = [];
-
   let currentGroup: Group | null = null;
 
   for (const entry of entries) {
@@ -370,6 +463,9 @@ function groupEntries(entries: LogEntry[]) {
   return groups;
 }
 
+/**
+ * Displays the grouped log entries in a webview panel.
+ */
 function displayResults(
   context: vscode.ExtensionContext,
   groupedEntries: any[]
@@ -390,16 +486,20 @@ function displayResults(
   panel.webview.html = htmlContent;
 }
 
+/**
+ * Generates the HTML content for the webview displaying log search results.
+ */
 function getWebviewContent(groupedEntries: any[]): string {
-  const keywords: string[] = vscode.workspace.getConfiguration('logSearch').get('keywords', []);
+  const keywords: string[] = configCache!.keywords;
   const highlightColor = '#ff66cc'; // Pink color for highlighting keywords
 
   let contentHtml = '';
 
   // Function to highlight keywords in the log message
-  const highlightKeywords = (text: string) => {
+  const highlightKeywords = (text: string): string => {
     if (keywords.length > 0) {
-      const keywordRegex = new RegExp(`(${keywords.join('|')})`, 'gi');
+      const escapedKeywords = keywords.map((kw) => escapeRegExp(kw));
+      const keywordRegex = new RegExp(`(${escapedKeywords.join('|')})`, 'gi');
       return text.replace(keywordRegex, `<strong style="color:${highlightColor};">$1</strong>`);
     }
     return text;
@@ -407,15 +507,16 @@ function getWebviewContent(groupedEntries: any[]): string {
 
   for (const group of groupedEntries) {
     const fileName = path.basename(group.filePath);
-    const startTime = DateTime.fromMillis(group.startTimestamp, { zone: 'utc' }).toFormat('yyyy-LL-dd HH:mm:ss');
-    const endTime = DateTime.fromMillis(group.endTimestamp, { zone: 'utc' }).toFormat('yyyy-LL-dd HH:mm:ss');
+    const startTime = DateTime.fromMillis(group.startTimestamp, { zone: 'utc' }).toFormat('yyyy-LL-dd HH:mm:ss \'UTC\'');
+    const endTime = DateTime.fromMillis(group.endTimestamp, { zone: 'utc' }).toFormat('yyyy-LL-dd HH:mm:ss \'UTC\'');
 
     let entriesHtml = '';
     for (const entry of group.entries) {
       const logLevel = parseLogLevel(entry.line) || 'info';
+      const logTimestamp = DateTime.fromMillis(entry.timestamp, { zone: 'utc' }).toFormat('yyyy-LL-dd HH:mm:ss \'UTC\'');
 
       // Try to format the line as JSON and highlight it
-      let formattedLogMessage;
+      let formattedLogMessage: string;
       let jsonBadge = ''; // Initialize without badge
 
       try {
@@ -432,6 +533,7 @@ function getWebviewContent(groupedEntries: any[]): string {
         <div class="log-entry ${logLevel.toLowerCase()}">
           <span class="line-number">${entry.lineNumber}:</span>
           ${jsonBadge} <!-- JSON badge only if it's a JSON log -->
+          <span class="utc-time">${logTimestamp}</span> <!-- Display UTC time -->
           <span class="log-message">${formattedLogMessage}</span>
         </div>
       `;
@@ -478,7 +580,6 @@ function getWebviewContent(groupedEntries: any[]): string {
     }
     .timestamp-range {
       color: #8a8a8a;
-      font-style: italic;
     }
     .log-entry {
       padding: 2px 0; /* Reduce spacing */
@@ -488,6 +589,13 @@ function getWebviewContent(groupedEntries: any[]): string {
     .line-number {
       color: #888;
       margin-right: 5px;
+      min-width: 40px;
+    }
+    .utc-time {
+      color: #ff66cc;
+      font-weight: bold;
+      margin-right: 10px;
+      white-space: nowrap; /* Ensure UTC time doesn't wrap */
     }
     .log-message {
       font-family: 'Consolas', 'Courier New', monospace;
@@ -513,6 +621,12 @@ function getWebviewContent(groupedEntries: any[]): string {
       font-weight: bold;
       color: ${highlightColor}; /* Pink for highlighted keywords */
     }
+    /* Log level specific styles */
+    .debug { color: #6a9955; }
+    .info { color: #569cd6; }
+    .warn { color: #dcdcaa; }
+    .error { color: #f44747; }
+    .fatal { color: #d16969; }
   `;
 
   return `<!DOCTYPE html>
@@ -531,6 +645,9 @@ function getWebviewContent(groupedEntries: any[]): string {
 </html>`;
 }
 
+/**
+ * Escapes HTML characters to prevent injection.
+ */
 function escapeHtml(unsafe: string): string {
   return unsafe
     .replace(/&/g, '&amp;')
@@ -540,6 +657,11 @@ function escapeHtml(unsafe: string): string {
     .replace(/'/g, '&#039;');
 }
 
-
+/**
+ * Escapes RegExp special characters in a string.
+ */
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
 
 export function deactivate() {}
