@@ -8,15 +8,16 @@ import { promisify } from 'util';
 import { Semaphore } from 'await-semaphore';
 import * as readline from 'readline';
 
+// Promisify necessary fs functions for asynchronous operations
+const readdir = promisify(fs.readdir);
+const stat = promisify(fs.stat);
+const writeFile = promisify(fs.writeFile);
+
 // Define the TimestampPattern interface
 interface TimestampPattern {
   pattern: string;
   format: string;
 }
-
-// Promisify necessary fs functions for asynchronous operations
-const readdir = promisify(fs.readdir);
-const stat = promisify(fs.stat);
 
 // Define a semaphore to limit the number of concurrent file processing operations
 const MAX_CONCURRENT_FILES = 10; // Adjust based on performance testing
@@ -174,7 +175,8 @@ export function activate(context: vscode.ExtensionContext) {
 
               const groupedEntries = groupEntries(matchedEntries);
 
-              displayResults(context, groupedEntries);
+              // Step 5: Export Results to HTML
+              await exportResultsToHtml(context, groupedEntries);
             } catch (err: any) {
               vscode.window.showErrorMessage(`Error during log search: ${err.message}`);
             }
@@ -203,7 +205,7 @@ async function getLogFiles(folderPath: string): Promise<string[]> {
     try {
       items = await readdir(dir);
     } catch (err) {
-      console.error(`Failed to read directory: ${dir}`, err);
+      console.error(`Failed to read directory: ${dir}, err: ${err}`);
       return;
     }
 
@@ -213,7 +215,7 @@ async function getLogFiles(folderPath: string): Promise<string[]> {
       try {
         itemStats = await stat(itemPath);
       } catch (err) {
-        console.error(`Failed to stat path: ${itemPath}`, err);
+        console.error(`Failed to stat path: ${itemPath}, err: ${err}`);
         return;
       }
 
@@ -464,9 +466,9 @@ function groupEntries(entries: LogEntry[]): any[] {
 }
 
 /**
- * Displays the grouped log entries in a webview panel.
+ * Exports the grouped log entries to an external HTML file with search and highlight functionality.
  */
-function displayResults(
+async function exportResultsToHtml(
   context: vscode.ExtensionContext,
   groupedEntries: any[]
 ) {
@@ -475,35 +477,68 @@ function displayResults(
     return;
   }
 
-  const panel = vscode.window.createWebviewPanel(
-    'logSearchResults',
-    'Log Search Results',
-    vscode.ViewColumn.One,
-    { enableScripts: false }
-  );
+  // Prompt user to choose a location to save the HTML file
+  const workspaceFolders = vscode.workspace.workspaceFolders;
+  const defaultPath = workspaceFolders && workspaceFolders.length > 0
+    ? path.join(workspaceFolders[0].uri.fsPath, 'logSearchResults.html')
+    : path.join(vscode.workspace.rootPath || '', 'logSearchResults.html');
 
-  const htmlContent = getWebviewContent(groupedEntries);
-  panel.webview.html = htmlContent;
+  const saveUri = await vscode.window.showSaveDialog({
+    title: 'Save Log Search Results',
+    defaultUri: vscode.Uri.file(defaultPath),
+    filters: {
+      'HTML Files': ['html'],
+    },
+  });
+
+  if (!saveUri) {
+    vscode.window.showErrorMessage('Save operation was canceled.');
+    return;
+  }
+
+  // Generate HTML content
+  const htmlContent = generateHtmlContent(groupedEntries);
+
+  try {
+    await writeFile(saveUri.fsPath, htmlContent, 'utf8');
+    vscode.window.showInformationMessage(`Log search results exported to ${saveUri.fsPath}`);
+
+    // Open the saved HTML file in the default browser
+    const fileUri = vscode.Uri.file(saveUri.fsPath);
+    await vscode.env.openExternal(fileUri);
+  } catch (error: any) {
+    vscode.window.showErrorMessage(`Failed to write HTML file: ${error.message}`);
+  }
 }
 
 /**
- * Generates the HTML content for the webview displaying log search results.
+ * Generates the HTML content for the exported log search results.
+ * Includes dynamic search highlighting.
  */
-function getWebviewContent(groupedEntries: any[]): string {
+function generateHtmlContent(groupedEntries: any[]): string {
   const keywords: string[] = configCache!.keywords;
   const highlightColor = '#ff66cc'; // Pink color for highlighting keywords
 
-  let contentHtml = '';
+  // Function to escape HTML characters
+  const escapeHtml = (unsafe: string): string =>
+    unsafe
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#039;');
 
-  // Function to highlight keywords in the log message
+  // Function to highlight predefined keywords
   const highlightKeywords = (text: string): string => {
     if (keywords.length > 0) {
-      const escapedKeywords = keywords.map((kw) => escapeRegExp(kw));
+      const escapedKeywords = keywords.map(escapeRegExp);
       const keywordRegex = new RegExp(`(${escapedKeywords.join('|')})`, 'gi');
-      return text.replace(keywordRegex, `<strong style="color:${highlightColor};">$1</strong>`);
+      return text.replace(keywordRegex, `<strong>$1</strong>`);
     }
     return text;
   };
+
+  let contentHtml = '';
 
   for (const group of groupedEntries) {
     const fileName = path.basename(group.filePath);
@@ -532,8 +567,8 @@ function getWebviewContent(groupedEntries: any[]): string {
       entriesHtml += `
         <div class="log-entry ${logLevel.toLowerCase()}">
           <span class="line-number">${entry.lineNumber}:</span>
-          ${jsonBadge} <!-- JSON badge only if it's a JSON log -->
-          <span class="utc-time">${logTimestamp}</span> <!-- Display UTC time -->
+          ${jsonBadge}
+          <span class="utc-time">${logTimestamp}</span>
           <span class="log-message">${formattedLogMessage}</span>
         </div>
       `;
@@ -542,31 +577,112 @@ function getWebviewContent(groupedEntries: any[]): string {
     contentHtml += `
       <details>
         <summary>
-          <span class="file-name">${fileName}</span>
-          <span class="timestamp-range">(${startTime} - ${endTime})</span>
+          <span class="file-name">${escapeHtml(fileName)}</span>
+          <span class="timestamp-range">(${escapeHtml(startTime)} - ${escapeHtml(endTime)})</span>
         </summary>
         ${entriesHtml}
       </details>
     `;
   }
 
+  // JavaScript for dynamic filtering with debouncing and search string highlighting
+  const script = `
+    <script>
+      document.addEventListener('DOMContentLoaded', function() {
+        const searchInput = document.getElementById('searchInput');
+        let debounceTimer;
+
+        searchInput.addEventListener('input', function() {
+          clearTimeout(debounceTimer);
+          debounceTimer = setTimeout(() => {
+            const filter = searchInput.value.trim().toLowerCase();
+
+            // Remove existing dynamic highlights
+            const existingHighlights = document.querySelectorAll('.dynamic-highlight');
+            existingHighlights.forEach(span => {
+              const parent = span.parentNode;
+              if (parent) {
+                parent.replaceChild(document.createTextNode(span.textContent || ''), span);
+                parent.normalize(); // Merge adjacent text nodes
+              }
+            });
+
+            const logEntries = document.querySelectorAll('.log-entry');
+            logEntries.forEach(entry => {
+              const text = entry.textContent.toLowerCase();
+              if (filter === '' || text.includes(filter)) {
+                entry.style.display = '';
+                // Highlight the search string within the log message
+                if (filter !== '') {
+                  const logMessage = entry.querySelector('.log-message');
+                  if (logMessage) {
+                    const regex = new RegExp('(' + escapeRegExp(filter) + ')', 'gi');
+                    logMessage.innerHTML = logMessage.innerHTML.replace(regex, '<span class="dynamic-highlight">$1</span>');
+                  }
+                }
+              } else {
+                entry.style.display = 'none';
+              }
+            });
+
+            // Hide/show groups based on visible entries
+            const groups = document.querySelectorAll('details');
+            groups.forEach(group => {
+              const visibleEntries = group.querySelectorAll('.log-entry:not([style*="display: none"])');
+              if (visibleEntries.length > 0) {
+                group.style.display = '';
+              } else {
+                group.style.display = 'none';
+              }
+            });
+          }, 300); // 300ms debounce
+        });
+
+        /**
+         * Escapes special characters in a string for use in a regular expression.
+         * @param {string} string - The string to escape.
+         * @returns {string} - The escaped string.
+         */
+        function escapeRegExp(string) {
+          return string.replace(/[.*+?^\\$\\{}()|[\\]\\\\]/g, '\\\\$&');
+        }
+      });
+    </script>
+  `;
+
+  // CSS for styling, including dynamic highlight
   const style = `
     body {
       font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
       background-color: #2d2d2d;
       color: #d4d4d4;
+      padding: 20px;
+      font-size: 14px;
+    }
+    h1 {
+      color: #ffffff;
+    }
+    #searchContainer {
+      margin-bottom: 20px;
+    }
+    #searchInput {
+      width: 100%;
       padding: 10px;
-      font-size: 12px; /* Smaller font size */
+      font-size: 14px;
+      border: 1px solid #555;
+      border-radius: 5px;
+      background-color: #3c3c3c;
+      color: #d4d4d4;
     }
     details {
       border: 1px solid #444;
       border-radius: 5px;
-      margin-bottom: 8px;
-      padding: 8px;
+      margin-bottom: 10px;
+      padding: 10px;
       background-color: #333;
     }
     summary {
-      font-size: 14px;
+      font-size: 16px;
       font-weight: bold;
       cursor: pointer;
       display: flex;
@@ -582,7 +698,7 @@ function getWebviewContent(groupedEntries: any[]): string {
       color: #8a8a8a;
     }
     .log-entry {
-      padding: 2px 0; /* Reduce spacing */
+      padding: 4px 0;
       display: flex;
       align-items: flex-start;
     }
@@ -595,7 +711,7 @@ function getWebviewContent(groupedEntries: any[]): string {
       color: #ff66cc;
       font-weight: bold;
       margin-right: 10px;
-      white-space: nowrap; /* Ensure UTC time doesn't wrap */
+      white-space: nowrap;
     }
     .log-message {
       font-family: 'Consolas', 'Courier New', monospace;
@@ -615,11 +731,15 @@ function getWebviewContent(groupedEntries: any[]): string {
       background-color: #1f6feb;
     }
     pre {
-      margin: 0; /* Remove default margin on pre */
+      margin: 0;
     }
     strong {
       font-weight: bold;
-      color: ${highlightColor}; /* Pink for highlighted keywords */
+      color: ${highlightColor};
+    }
+    .dynamic-highlight {
+      background-color: yellow;
+      color: black;
     }
     /* Log level specific styles */
     .debug { color: #6a9955; }
@@ -632,15 +752,19 @@ function getWebviewContent(groupedEntries: any[]): string {
   return `<!DOCTYPE html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<title>Log Search Results</title>
-<style>${style}</style>
+  <meta charset="UTF-8">
+  <title>Log Search Results</title>
+  <style>${style}</style>
 </head>
 <body>
-<h1>Log Search Results</h1>
-<div class="log-groups">
-  ${contentHtml}
-</div>
+  <h1>Log Search Results</h1>
+  <div id="searchContainer">
+    <input type="text" id="searchInput" placeholder="Search logs...">
+  </div>
+  <div class="log-groups">
+    ${contentHtml}
+  </div>
+  ${script}
 </body>
 </html>`;
 }
