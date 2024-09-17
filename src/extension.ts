@@ -29,13 +29,11 @@ let configCache: {
   excludePatterns: string[];
   customTimestampPatterns: TimestampPattern[];
   timestampFields: string[];
-  logLevels: string[];
   keywords: string[];
 } | null = null;
 
 // Precompile static regular expressions outside of loops
 const isoRegex = /\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}.\d+Z/;
-const logLevelRegex = /\b(DEBUG|INFO|WARN|ERROR|FATAL)\b/i;
 
 // Preprocess and compile custom regex patterns
 interface CompiledTimestampPattern {
@@ -54,7 +52,6 @@ async function initializeConfig() {
     excludePatterns: vscode.workspace.getConfiguration('logSearch').get<string[]>('excludePatterns', ['**/node_modules/**']),
     customTimestampPatterns: vscode.workspace.getConfiguration('logSearch').get<TimestampPattern[]>('customTimestampRegexes', []),
     timestampFields: vscode.workspace.getConfiguration('logSearch').get<string[]>('timestampFields', ['created', 'modified']),
-    logLevels: vscode.workspace.getConfiguration('logSearch').get<string[]>('logLevels', ['INFO', 'WARN', 'ERROR', 'FATAL']),
     keywords: vscode.workspace.getConfiguration('logSearch').get<string[]>('keywords', []),
   };
 
@@ -304,15 +301,6 @@ function isWithinRange(
 }
 
 /**
- * Parses the log level from a line.
- * Utilizes a precompiled regex for efficiency.
- */
-function parseLogLevel(line: string): string | null {
-  const match = line.match(logLevelRegex);
-  return match ? match[1].toLowerCase() : null;
-}
-
-/**
  * Asynchronously processes a single log file to extract matching log entries.
  * Utilizes streams and readline for efficient line-by-line processing.
  */
@@ -326,10 +314,6 @@ async function processLogFile(
   if (token.isCancellationRequested) {
     return;
   }
-
-  const { logLevels } = configCache!;
-  const includeAllLevels = logLevels.includes('ALL');
-  const normalizedLogLevels = logLevels.map((level) => level.toUpperCase());
 
   const fileStream = fs.createReadStream(filePath, { encoding: 'utf8' });
 
@@ -391,15 +375,12 @@ async function processLogFile(
       // Handle regular log lines (non-JSON)
       const timestamp = parseTimestamp(line);
       if (timestamp !== null && isWithinRange(timestamp, startEpoch, endEpoch)) {
-        const logLevel = parseLogLevel(line);
-        if (includeAllLevels || (logLevel && normalizedLogLevels.includes(logLevel.toUpperCase()))) {
-          matchedEntries.push({
-            timestamp,
-            line,
-            filePath,
-            lineNumber,
-          });
-        }
+        matchedEntries.push({
+          timestamp,
+          line,
+          filePath,
+          lineNumber,
+        });
       }
     }
 
@@ -547,7 +528,6 @@ function generateHtmlContent(groupedEntries: any[]): string {
 
     let entriesHtml = '';
     for (const entry of group.entries) {
-      const logLevel = parseLogLevel(entry.line) || 'info';
       const logTimestamp = DateTime.fromMillis(entry.timestamp, { zone: 'utc' }).toFormat('yyyy-LL-dd HH:mm:ss \'UTC\'');
 
       // Try to format the line as JSON and highlight it
@@ -565,7 +545,7 @@ function generateHtmlContent(groupedEntries: any[]): string {
       }
 
       entriesHtml += `
-        <div class="log-entry ${logLevel.toLowerCase()}">
+        <div class="log-entry">
           <span class="line-number">${entry.lineNumber}:</span>
           ${jsonBadge}
           <span class="utc-time">${logTimestamp}</span>
@@ -741,12 +721,6 @@ function generateHtmlContent(groupedEntries: any[]): string {
       background-color: yellow;
       color: black;
     }
-    /* Log level specific styles */
-    .debug { color: #6a9955; }
-    .info { color: #569cd6; }
-    .warn { color: #dcdcaa; }
-    .error { color: #f44747; }
-    .fatal { color: #d16969; }
   `;
 
   return `<!DOCTYPE html>

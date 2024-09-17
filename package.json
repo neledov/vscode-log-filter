@@ -1,10 +1,15 @@
 {
-  "name": "log-search",
-  "displayName": "Log Search",
-  "description": "A VSCode extension for searching and filtering log files with support for JSON logs, keyword highlighting, and timestamp filtering.",
-  "version": "1.1.0",
+  "name": "vscode-log-filter",
+  "displayName": "Log Filter",
+  "description": "A VSCode extension to search and filter log files with advanced features.",
+  "version": "1.0.0",
+  "publisher": "anton neledov",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/neledov/vscode-log-filter/"
+  },
   "engines": {
-    "vscode": "^1.60.0"
+    "vscode": "^1.50.0"
   },
   "categories": [
     "Other"
@@ -17,72 +22,67 @@
     "commands": [
       {
         "command": "logSearch.searchLogs",
-        "title": "Search Logs"
+        "title": "Log Search: Search Logs"
       }
     ],
     "configuration": {
-      "title": "Log Search Settings",
+      "type": "object",
+      "title": "Log Search Configuration",
       "properties": {
         "logSearch.includePatterns": {
           "type": "array",
-          "default": [
-            "**/*.log"
-          ],
-          "description": "File patterns to include in the log search."
+          "default": ["**/*.log"],
+          "description": "Glob patterns to include log files."
         },
         "logSearch.excludePatterns": {
           "type": "array",
-          "default": [
-            "**/node_modules/**"
-          ],
-          "description": "File patterns to exclude from the log search."
-        },
-        "logSearch.logLevels": {
-          "type": "array",
-          "default": [
-            "INFO",
-            "WARN",
-            "ERROR",
-            "FATAL"
-          ],
-          "description": "Log levels to include in the search. Use 'ALL' to include all levels."
-        },
-        "logSearch.timestampFields": {
-          "type": "array",
-          "default": [
-            "created",
-            "modified"
-          ],
-          "description": "The JSON fields to extract timestamps from when processing JSON log entries."
+          "default": ["**/node_modules/**"],
+          "description": "Glob patterns to exclude from search."
         },
         "logSearch.customTimestampRegexes": {
           "type": "array",
-          "description": "Custom regex patterns for extracting timestamps from non-JSON log entries."
+          "default": [],
+          "description": "Custom regex patterns to extract timestamps."
+        },
+        "logSearch.timestampFields": {
+          "type": "array",
+          "default": ["created", "modified"],
+          "description": "Fields in JSON logs that contain timestamps."
         },
         "logSearch.keywords": {
           "type": "array",
           "default": [],
-          "description": "Keywords to highlight in the log output."
+          "description": "Keywords to highlight in the search results."
         }
       }
     }
   },
   "scripts": {
-    "vscode:prepublish": "tsc -p ./",
+    "vscode:prepublish": "npm run compile",
     "compile": "tsc -p ./",
     "watch": "tsc -watch -p ./",
-    "postinstall": "node ./node_modules/vscode/bin/install"
+    "pretest": "npm run compile",
+    "test": "node ./out/test/runTest.js"
   },
   "devDependencies": {
-    "@types/mocha": "^10.0.8",
-    "@types/node": "^12.0.0",
-    "mocha": "^10.7.3",
+    "@types/micromatch": "^4.0.2",
+    "@types/node": "^18.0.0",
+    "@types/vscode": "^1.50.0",
     "typescript": "^4.0.0",
-    "vscode": "^1.1.37"
+    "vscode-test": "^1.6.0"
   },
   "dependencies": {
-    "await-semaphore": "^0.1.3",
-    "luxon": "^2.0.2",
+    "await-semaphore": "^0.3.2",
+    "luxon": "^3.3.0",
     "micromatch": "^4.0.4"
-  }
+  },
+  "keywords": [
+    "vscode",
+    "extension",
+    "log",
+    "filter",
+    "search"
+  ],
+  "author": "Anton Neledov",
+  "license": "MIT"
 }
